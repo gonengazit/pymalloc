@@ -30,6 +30,7 @@ class PtMallocState:
         # because our chunks aren't actually contiguous in memory - we'll store a big lookup table of all the chunks
         self.free_chunks_by_start = {}
         self.free_chunks_by_end = {}
+        self.allocated_chunks = {}
 
     def split_chunk(self, victim: MallocChunk, alloc_sz: int) ->tuple[MallocChunk, MallocChunk]:
         """split victim into 2 chunks - the first of size alloc_sz"""
@@ -69,17 +70,24 @@ class PtMallocState:
                 p = fb.pop()
                 self.coalesce_chunk(p)
 
-    def coalesce_chunk(self, chunk: MallocChunk) -> MallocChunk:
+    def coalesce_chunk(self, chunk: MallocChunk) -> MallocChunk | None:
         """Coalesce a chunk with its neighbours if they are free, and move the colesced chunk to the unsorted bin
-        if the chunk is next to the heap top - extend the top with it instead"""
+        if the chunk is next to the heap top - extend the top with it instead and return None"""
+        if chunk.address in self.free_chunks_by_end:
+            prev = self.free_chunks_by_end[chunk.address]
+            chunk = self.merge_chunks(prev, chunk)
+
         if chunk.address + chunk.size in self.free_chunks_by_start:
             next = self.free_chunks_by_start[chunk.address + chunk.size]
 
             chunk = self.merge_chunks(chunk, next)
 
-        if chunk.address in self.free_chunks_by_end:
-            prev = self.free_chunks_by_end[chunk.address]
-            chunk = self.merge_chunks(prev, chunk)
+        elif chunk.address + chunk.size == self.top:
+            self.top = chunk.address
+            self.remove_from_free_chunks(chunk)
+            return None
+
+
 
         return chunk
 
@@ -116,6 +124,7 @@ class PtMallocState:
     def malloc(self, sz: int):
         chunk = self._malloc(sz)
         self.remove_from_free_chunks(chunk)
+        self.allocated_chunks[chunk.address] = chunk
 
     def _malloc(self, sz: int) -> MallocChunk:
         # make size the actual chunk allocation size, rounded to 0x10 and including heap metadata
@@ -123,12 +132,12 @@ class PtMallocState:
         sz = max(sz, MIN_CHUNK_SIZE)
 
         # if we're small enough for the tcache and the relevant tcache is not empty - return the top element from it
-        tcache_idx = sz // 0x20
+        tcache_idx = sz // 0x10
         if tcache_idx < len(self.tcache) and self.tcache[tcache_idx]:
             return self.tcache[tcache_idx].pop()
 
         # if we're small enough for the fastbins and the relevant fastbin is not empty - return the top element from it
-        fastbin_idx = sz // 0x20
+        fastbin_idx = sz // 0x10
         if fastbin_idx < len(self.fastbins) and self.fastbins[fastbin_idx]:
             victim = self.fastbins[fastbin_idx].pop()
 
@@ -139,7 +148,7 @@ class PtMallocState:
             return victim
 
         # if we're small enough for the smallbins and the relevant smallbin is not empty (exact fit) - return the first element from it
-        smallbin_idx = sz // 0x20
+        smallbin_idx = sz // 0x10
         if smallbin_idx < len(self.smallbins):
             victim = self.smallbins[smallbin_idx].popleft()
 
@@ -266,6 +275,44 @@ class PtMallocState:
         self.add_to_free_chunks(victim)
         self.top += sz
         return victim
+
+    def free(self, addr: int) -> None:
+        chunk = self.allocated_chunks.pop(addr)
+        self.add_to_free_chunks(chunk)
+
+        sz = chunk.size
+
+        if sz < MAX_TCACHE_SIZE:
+            self.tcache.append(chunk)
+            return
+
+        if sz <= MAX_FAST_SIZE:
+            fastbin_idx = sz // 0x10
+            return self.fastbins[fastbin_idx].pop()
+
+        # TODO: add support for mmaped chunks
+
+        chunk = self.coalesce_chunk(chunk)
+        # coalsced with top
+        if chunk is None:
+            return
+        sz = chunk.size
+
+        if sz >= MIN_LARGE_SIZE:
+            # if the chunk is large place it in the unsorted bin
+            self.unsorted_bin.append(chunk)
+        else:
+            # if the chunk is small place it directly in the smallbin
+            smallbin_idx = sz // 0x10
+            self.smallbins[smallbin_idx].append(chunk)
+        return
+
+
+
+
+
+
+
 
 
 
