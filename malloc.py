@@ -121,10 +121,11 @@ class PtMallocState:
 
 
 
-    def malloc(self, sz: int):
+    def malloc(self, sz: int) -> int:
         chunk = self._malloc(sz)
         self.remove_from_free_chunks(chunk)
         self.allocated_chunks[chunk.address] = chunk
+        return chunk.address
 
     def _malloc(self, sz: int) -> MallocChunk:
         # make size the actual chunk allocation size, rounded to 0x10 and including heap metadata
@@ -149,7 +150,7 @@ class PtMallocState:
 
         # if we're small enough for the smallbins and the relevant smallbin is not empty (exact fit) - return the first element from it
         smallbin_idx = sz // 0x10
-        if smallbin_idx < len(self.smallbins):
+        if smallbin_idx < len(self.smallbins) and self.smallbins[smallbin_idx]:
             victim = self.smallbins[smallbin_idx].popleft()
 
             # while we're here - fill the tcache from the smallbin
@@ -283,7 +284,8 @@ class PtMallocState:
         sz = chunk.size
 
         if sz < MAX_TCACHE_SIZE:
-            self.tcache.append(chunk)
+            tcache_idx = sz // 0x10
+            self.tcache[tcache_idx].append(chunk)
             return
 
         if sz <= MAX_FAST_SIZE:
