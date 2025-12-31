@@ -200,11 +200,12 @@ class PtMallocState:
                     return victim
 
             # put the chunk in the relvant bin
-            if smallbin_idx < len(self.smallbins):
-                self.smallbins[smallbin_idx].append(victim)
+            if victim.size < MIN_LARGE_SIZE:
+                victim_smallbin_idx = victim.size // 0x10
+                self.smallbins[victim_smallbin_idx].append(victim)
             else:
-                largebin_idx = self.largebin_index(sz)
-                bin = self.bin_at(largebin_idx)
+                victim_largebin_idx = self.largebin_index(victim.size)
+                bin = self.bin_at(victim_largebin_idx)
                 # make sure we got a largebin
                 assert isinstance(bin, list)
                 # insert chunk into bin maintaining sorted order.
