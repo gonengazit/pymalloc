@@ -63,6 +63,21 @@ class PtMallocState:
     def remove_from_free_chunks(self, victim: MallocChunk):
         del self.free_chunks_by_start[victim.address]
         del self.free_chunks_by_end[victim.address + victim.size]
+        #TODO: improve the performance of this
+        for bin in self.tcache:
+            if victim in bin:
+                bin.remove(victim)
+
+        for bin in self.smallbins:
+            if victim in bin:
+                bin.remove(victim)
+
+        for bin in self.largebins:
+            if victim in bin:
+                bin.remove(victim)
+
+        if victim in self.unsorted_bin:
+            self.unsorted_bin.remove(victim)
 
     def consolidate(self):
         for fb in self.fastbins:
