@@ -299,14 +299,15 @@ class PtMallocState:
 
         sz = chunk.size
 
-        if sz < MAX_TCACHE_SIZE:
+        if sz <= MAX_TCACHE_SIZE:
             tcache_idx = sz // 0x10
-            self.tcache[tcache_idx].append(chunk)
-            return
+            if len(self.tcache[tcache_idx]) < MAX_TCACHE_LEN:
+                self.tcache[tcache_idx].append(chunk)
+                return
 
         if sz <= MAX_FAST_SIZE:
             fastbin_idx = sz // 0x10
-            return self.fastbins[fastbin_idx].pop()
+            return self.fastbins[fastbin_idx].append(chunk)
 
         # TODO: add support for mmaped chunks
 
