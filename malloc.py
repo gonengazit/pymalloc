@@ -2,7 +2,7 @@ from math import ceil
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-MAX_FAST_SIZE=0xA0
+MAX_FAST_SIZE=0x80 # Note that this is equal to the glibc macro DEFAULT_MXFAST and not the glibc macro MAX_FAST_SIZE
 MAX_TCACHE_SIZE = 0x411 # 0x408 in glibc versions that aren't super-duper new (July 2025)
 MIN_LARGE_SIZE = 0x400
 MIN_CHUNK_SIZE = 0x20
@@ -32,8 +32,8 @@ class MallocChunk:
 #TODO: try to somehow deal with the fact that the tcache is allocated dynamically at runtime and thus can consume chunks from the unsorted bin. ugh
 class PtMallocState:
     def __init__(self) -> None:
-        self.tcache: list[deque[MallocChunk]] = [deque() for _ in range(0, MAX_TCACHE_SIZE, 0x10)] # stack
-        self.fastbins: list[deque[MallocChunk]] = [deque() for _ in range(0, MAX_FAST_SIZE, 0x10)] # stack
+        self.tcache: list[deque[MallocChunk]] = [deque() for _ in range(0, MAX_TCACHE_SIZE + 1, 0x10)] # stack
+        self.fastbins: list[deque[MallocChunk]] = [deque() for _ in range(0, MAX_FAST_SIZE + 1, 0x10)] # stack
         self.unsorted_bin: deque[MallocChunk] = deque() # queue
         self.smallbins: list[deque[MallocChunk]] = [deque() for _ in range(0, MIN_LARGE_SIZE, 0x10)] # queue
         self.largebins: list[list[MallocChunk]] = [[] for _ in range(NUM_LARGE_BINS)] # queue-ish - sorted smallest to largest
