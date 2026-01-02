@@ -106,10 +106,14 @@ class PtMallocState:
         for fb in self.fastbins:
             while fb:
                 p = fb.pop()
-                self.coalesce_chunk(p)
+                coalsced = self.coalesce_chunk(p)
+                if coalsced is None:
+                    continue
+                coalsced.bin = BinType.UNSORTED_BIN
+                self.unsorted_bin.append(coalsced)
 
     def coalesce_chunk(self, chunk: MallocChunk) -> MallocChunk | None:
-        """Coalesce a chunk with its neighbours if they are free, and move the colesced chunk to the unsorted bin
+        """Coalesce a chunk with its neighbours if they are free
         if the chunk is next to the heap top - extend the top with it instead and return None"""
         if chunk.address in self.free_chunks_by_end:
             prev = self.free_chunks_by_end[chunk.address]
@@ -193,17 +197,17 @@ class PtMallocState:
 
         # if we're small enough for the smallbins and the relevant smallbin is not empty (exact fit) - return the first element from it
         smallbin_idx = sz // 0x10
-        if smallbin_idx < len(self.smallbins) and self.smallbins[smallbin_idx]:
-            victim = self.smallbins[smallbin_idx].popleft()
+        if smallbin_idx < len(self.smallbins):
+            if self.smallbins[smallbin_idx]:
+                victim = self.smallbins[smallbin_idx].popleft()
 
-            # while we're here - fill the tcache from the smallbin
-            while self.smallbins[smallbin_idx] and len(self.tcache[tcache_idx]) < MAX_TCACHE_LEN:
-                back = self.smallbins[smallbin_idx].popleft()
-                back.bin = BinType.TCACHE
-                self.tcache[tcache_idx].append(back)
+                # while we're here - fill the tcache from the smallbin
+                while self.smallbins[smallbin_idx] and len(self.tcache[tcache_idx]) < MAX_TCACHE_LEN:
+                    back = self.smallbins[smallbin_idx].popleft()
+                    back.bin = BinType.TCACHE
+                    self.tcache[tcache_idx].append(back)
 
-            return victim
-
+                return victim
         else:
             self.consolidate()
 
