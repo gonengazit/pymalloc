@@ -199,6 +199,20 @@ scenarios = {
         ("M", 0x100, 0),
         ("F", 0), # No guard between chunk 0 and top.
         ("M", 0x200, 1), # Should start at the same address as chunk 0
+    ],
+    "stale_last_remainder": [
+        # freeing a chunk that was once the last remainder should bring it back to be the last remainder
+        ("M", 0x10, 0), # allocate tcache
+        ("M", 0x700, 1),
+        ("M", 0x1b00, 2),
+        ("M", 0x10, 3),
+        ("F", 2),
+        ("M", 0x10, 4),
+        ("M", 0x1700, 5),
+        ("F", 1),
+        ("F", 5),
+        ("M", 0x100, 6)
+
     ]
 }
 
