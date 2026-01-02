@@ -43,8 +43,10 @@ def run_differential_test(pt_malloc_instance, name, cmds):
                 idx = cmd[1]
                 pt_malloc_instance.free(py_ptrs[idx])
         print(f"✅ {name}: PASSED")
+        return True
     except Exception as e:
         print(f"❌ {name}: FAILED - {e}")
+        return False
         # raise e
 
 # Define scenarios to exercise the logic
@@ -57,11 +59,19 @@ scenarios = {
         ('M', 0x20, 8),                # Should come from tcache (index 6)
     ],
 
+    "tcache_max_size": [
+        ('M', 0x400, 0),
+        ('M', 0x400, 1),
+        ('F', 0),        # will go in the tcache (on super new glibc versions)
+        ('M', 0x100, 2),
+    ],
+
     "unsorted_bin_consolidation": [
-        ('M', 0x400, 0), # Large enough to bypass tcache/fastbins
-        ('M', 0x400, 1), # Prevent consolidation with top
+        ('M', 0x20,  0), # allocate the tcache now
+        ('M', 0x410, 1), # Large enough to bypass tcache/fastbins
+        ('M', 0x410, 2), # Prevent consolidation with top
         ('F', 0),        # Goes to unsorted bin
-        ('M', 0x100, 2), # Causes 0 to be split. Remainder stays in unsorted.
+        ('M', 0x100, 3), # Causes 0 to be split. Remainder stays in unsorted.
     ],
 
     "backward_coalescing": [
@@ -87,6 +97,50 @@ scenarios = {
         *[('M', 0x20, 10+i) for i in range(7)],
         # 4. Request 0x20 again -> triggers smallbin stash to tcache
         ('M', 0x20, 20),
+    ],
+    "tcache_basic": [
+        ("M", 0x20, 0), ("M", 0x20, 1),
+        ("F", 0), ("F", 1),            # Both to tcache
+        ("M", 0x20, 2),                # Should reuse chunk 1 (LIFO)
+    ],
+
+    "fastbin_overflow_to_unsorted": [
+        *[("M", 0x20, i) for i in range(9)],
+        *[("F", i) for i in range(8)], # 7 to tcache, 1 to fastbin
+        ("M", 0x400, 9),               # Allocate large to trigger consolidation/binning
+        ("M", 0x20, 10),               # Should pull from tcache
+    ],
+
+    "unsorted_bin_splitting": [
+        ("M", 0x400, 0),               # Chunk A
+        ("M", 0x10, 1),                # Guard (prevent top merge)
+        ("F", 0),                      # A -> Unsorted Bin
+        ("M", 0x100, 2),               # Should split A. Remainder stays in Unsorted.
+        ("M", 0x100, 3),               # Should split remainder of A.
+    ],
+
+    "coalescing_backward_forward": [
+        ("M", 0x400, 0), ("M", 0x400, 1), ("M", 0x400, 2),
+        ("M", 0x10, 3),                # Guard
+        ("F", 1),                      # Middle to Unsorted
+        ("F", 0),                      # Merge 0 into 1
+        ("F", 2),                      # Merge 2 into 0+1
+    ],
+
+    "tcache_stash_from_smallbin": [
+        # 1. Fill tcache for 0x30
+        *[("M", 0x30, i) for i in range(7)],
+        *[("F", i) for i in range(7)],
+        # 2. Put two chunks into Smallbin (via Unsorted)
+        ("M", 0x30, 7), ("M", 0x30, 8),
+        ("M", 0x10, 9),                # Guard
+        ("F", 7), ("F", 8),            # Into Unsorted
+        ("M", 0x400, 10),              # Trigger binning: 7 and 8 move to Smallbins
+        # 3. Empty tcache
+        *[("M", 0x30, 20+i) for i in range(7)],
+        # 4. Trigger Stash: Malloc 0x30.
+        # It finds one in smallbin, then moves others to tcache.
+        ("M", 0x30, 30),
     ]
 }
 
