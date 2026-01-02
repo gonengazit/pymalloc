@@ -4,6 +4,55 @@ import argparse
 
 import subprocess
 
+import random
+
+class MallocFuzzer:
+    def __init__(self):
+        # Probability weights for different size classes
+        self.size_weights = [
+            (range(0x10, 0x80), 0.50),   # Tcache/Fastbins (Very common)
+            (range(0x90, 0x400), 0.35),  # Smallbins
+            (range(0x410, 0x2000), 0.15) # Largebins
+        ]
+        self.live_ptrs = [] # List of (index, size)
+        self.next_idx = 0
+
+    def generate_commands(self, num_ops=500):
+        # always start by allocating the tcache (for now)
+        # TODO: when we implement tcache allocation - remove this
+        commands = [('M', 0x10, 0)]
+        self.next_idx += 1
+        for _ in range(num_ops):
+            # Decide: Malloc or Free?
+            # We weight Malloc higher initially to grow the heap
+            action_weight = 0.6 if len(self.live_ptrs) < 20 else 0.4
+
+            if random.random() < action_weight or not self.live_ptrs:
+                # --- Malloc Path ---
+                # Select a size range based on weights
+                r = random.random()
+                cumulative = 0
+                selected_range = range(0x10, 0x100)
+                for r_range, weight in self.size_weights:
+                    cumulative += weight
+                    if r <= cumulative:
+                        selected_range = r_range
+                        break
+
+                size = random.choice(selected_range)
+                idx = self.next_idx
+                self.next_idx += 1
+                commands.append(('M', size, idx))
+                self.live_ptrs.append((idx, size))
+            else:
+                # --- Free Path ---
+                # Randomly pick a live pointer to free
+                list_idx = random.randrange(len(self.live_ptrs))
+                ptr_idx, _ = self.live_ptrs.pop(list_idx)
+                commands.append(('F', ptr_idx))
+
+        return commands
+
 def run_differential_test(pt_malloc_instance: PtMallocState, name: str, cmds):
     # Build C input
     c_input = ""
@@ -14,6 +63,7 @@ def run_differential_test(pt_malloc_instance: PtMallocState, name: str, cmds):
     # Get C Output
     proc = subprocess.Popen(['./harness'], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # print(c_input)
     stdout, _ = proc.communicate(input=c_input.encode())
     c_offsets = stdout.decode().splitlines()
 
@@ -40,15 +90,57 @@ def run_differential_test(pt_malloc_instance: PtMallocState, name: str, cmds):
                 assert py_offset == c_offset, f"Mismatch: C={c_offset:#x}, Py={py_offset:#x}"
                 py_ptrs[idx] = py_ptr
             else:
-                # print(" ", cmd[0], cmd[1])
                 idx = cmd[1]
                 pt_malloc_instance.free(py_ptrs[idx])
+                # print(" ", cmd[0], cmd[1])
         print(f"✅ {name}: PASSED")
         return True
     except Exception as e:
         print(f"❌ {name}: FAILED - {e}")
         return False
-        # raise e
+
+def run_fuzzer_test(pt_malloc_instance, num_ops=1000):
+    fuzzer = MallocFuzzer()
+    commands = fuzzer.generate_commands(num_ops)
+
+    # 1. Run C Harness to get "Golden Trace"
+    input_str = "".join([f"M {c[1]} {c[2]} " if c[0]=='M' else f"F {c[1]} " for c in commands])
+    proc = subprocess.Popen(['./harness'], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    stdout, _ = proc.communicate(input=input_str.encode())
+    c_offsets = stdout.decode().splitlines()
+
+    # 2. Run Python and Compare
+    py_ptrs = {}
+    base_addr = None
+
+    for i, (line, cmd) in enumerate(zip(c_offsets, commands)):
+        try:
+            if cmd[0] == 'M':
+                size, idx = cmd[1], cmd[2]
+                py_ptr = pt_malloc_instance.malloc(size)
+
+                if base_addr is None:
+                    base_addr = py_ptr
+
+                py_offset = py_ptr - base_addr
+                c_offset = int(line)
+
+                # print(cmd[0], hex(size), idx, hex(py_offset), hex(c_offset))
+                if py_offset != c_offset:
+                    raise ValueError(f"Offset mismatch! Step {i}: C={c_offset:#x}, Py={py_offset:#x}")
+
+                py_ptrs[idx] = py_ptr
+            else:
+                # print(cmd[0], cmd[1])
+                idx = cmd[1]
+                pt_malloc_instance.free(py_ptrs[idx])
+
+        except Exception as e:
+            print(f"CRASH AT STEP {i}: {cmd}")
+            print(f"Error: {e}")
+            return False
+            # Here you would call pt_malloc_instance.dump_state()
+    return True
 
 # Define scenarios to exercise the logic
 scenarios = {
@@ -289,11 +381,14 @@ scenarios = {
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("test_name", nargs="?")
+    parser.add_argument("test_name", nargs="?", choices=list(scenarios.keys()) + ["fuzz"])
     args = parser.parse_args()
     if args.test_name:
         allocator = PtMallocState()
-        run_differential_test(allocator, args.test_name,  scenarios[args.test_name])
+        if args.test_name == "fuzz":
+            run_fuzzer_test(allocator)
+        else:
+            run_differential_test(allocator, args.test_name,  scenarios[args.test_name])
         return
 
     for name, commands in scenarios.items():
