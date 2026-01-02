@@ -165,7 +165,7 @@ scenarios = {
         ("M", 0x410, 4), ("M", 0x10, 5),  # Chunk C + Guard
 
         # Move A, B, and C to Unsorted Bin
-        ("F", 0), ("F", 2), ("F", 4),
+        ("F", 2), ("F", 0), ("F", 4),
 
         # Trigger binning into Largebins by requesting something that
         # doesn't fit in Unsorted (or exceeds a threshold)
@@ -231,6 +231,18 @@ scenarios = {
         ("M", 0x100, 3),
     ],
 
+    "smallbin_order": [
+        ("M", 0x90, 0),
+        ("M", 0x20, 1),
+        ("M", 0x90, 2),
+        ("M", 0x20, 3),
+        *([("M", 0x90, i) for i in range(4, 11)] + [("F", i) for i in range(4,11)]) ,
+        ("F", 0),
+        ("F", 2),
+        ("M", 0x50, 4),
+        ("M", 0x50, 5),
+    ],
+
     "last_remainder_locality_priority": [
         ("M", 0x20, 17), # make sure the cache is allocated
         # 1. Put TWO chunks in Unsorted Bin
@@ -262,6 +274,16 @@ scenarios = {
 
         ("M", 0x80, 9), # Splits from 7, remainder is last_remainder
         ("M", 0x80, 10), # Should come from last_remainder
+    ],
+    "largebin_ordering": [
+        ('M', 0x10, 0), # allocate tcache
+        ('M', 0x1030, 1),
+        ('M', 0x10, 2),
+        ('M', 0x1000, 3),
+        ('M', 0x10, 4),
+        ('F', 3),
+        ('F', 1),
+        ('M', 0x20, 5), # should allocate from the 0x1000 chunk
     ]
 }
 
