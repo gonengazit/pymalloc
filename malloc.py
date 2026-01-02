@@ -217,7 +217,7 @@ class PtMallocState:
             victim = self.unsorted_bin.popleft()
             # if this is a small request and the only chunk left in the unsorted bin is the last remainder - split and allocate it.
             # this is the only exception to best-fit
-            if smallbin_idx < len(self.smallbins) and not self.unsorted_bin and victim == self.last_remainder and victim.size > sz + MIN_CHUNK_SIZE:
+            if smallbin_idx < len(self.smallbins) and not self.unsorted_bin and self.last_remainder and victim.address == self.last_remainder.address and victim.size > sz + MIN_CHUNK_SIZE:
                 split_victim, remainder = self.split_chunk(victim, sz)
 
                 remainder.bin = BinType.UNSORTED_BIN
