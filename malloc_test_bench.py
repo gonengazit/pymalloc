@@ -35,12 +35,12 @@ def run_differential_test(pt_malloc_instance: PtMallocState, name: str, cmds):
 
                 py_offset = py_ptr - base_addr
                 c_offset = int(line)
-                # print(cmd[0], hex(size),  hex(py_offset), hex(c_offset))
+                # print(idx, cmd[0], hex(size), hex(py_offset), hex(c_offset))
 
                 assert py_offset == c_offset, f"Mismatch: C={c_offset:#x}, Py={py_offset:#x}"
                 py_ptrs[idx] = py_ptr
             else:
-                # print(cmd[0], cmd[1])
+                # print(" ", cmd[0], cmd[1])
                 idx = cmd[1]
                 pt_malloc_instance.free(py_ptrs[idx])
         print(f"✅ {name}: PASSED")
@@ -213,6 +213,55 @@ scenarios = {
         ("F", 5),
         ("M", 0x100, 6)
 
+    ],
+    "last_remainder_basic_split": [
+        ("M", 0x20, 17), # make sure the cache is allocated
+        # 1. Setup: Get a chunk into the Unsorted Bin
+        ("M", 0x420, 0),
+        ("M", 0x20, 1),   # Guard chunk to prevent top-consolidation
+        ("F", 0),         # Chunk 0 -> Unsorted Bin
+
+        # 2. Trigger splitting
+        # Requesting 0x100. Chunk 0 (0x410) is split.
+        # 0x110 is returned, 0x300 becomes 'last_remainder'
+        ("M", 0x100, 2),
+
+        # 3. Use the last remainder
+        # This should come directly from the remainder of Chunk 0
+        ("M", 0x100, 3),
+    ],
+
+    "last_remainder_locality_priority": [
+        ("M", 0x20, 17), # make sure the cache is allocated
+        # 1. Put TWO chunks in Unsorted Bin
+        ("M", 0x420, 0), ("M", 0x20, 1), # A + Guard
+        ("M", 0x420, 2), ("M", 0x20, 3), # B + Guard
+        ("F", 0),
+        ("F", 2), # Unsorted Bin now has [B] -> [A]
+
+        # 2. Split chunk B
+        # This makes the remainder of B the 'last_remainder'
+        ("M", 0x100, 4),
+
+        # 3. Request another small chunk
+        # Even though Chunk A (at index 0) is a perfect fit or
+        # available in the bin, glibc should check the remainder
+        # of B first because it is the 'last_remainder'.
+        ("M", 0x100, 5),
+    ],
+
+    "last_remainder_tcache_bypass": [
+        ("M", 0x20, 17), # make sure the cache is allocated
+        # Since tcache exists, we must fill it to see Unsorted Bin behavior
+        # for sizes that would otherwise fit in tcache.
+        *[("M", 0x80, i) for i in range(7)],
+        *[("F", i) for i in range(7)], # Tcache(0x90) is now full
+
+        ("M", 0x420, 7), ("M", 0x20, 8), # Large chunk + Guard
+        ("F", 7), # Into Unsorted Bin
+
+        ("M", 0x80, 9), # Splits from 7, remainder is last_remainder
+        ("M", 0x80, 10), # Should come from last_remainder
     ]
 }
 
