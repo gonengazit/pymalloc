@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 // Use a fixed-size array for pointers to avoid heap usage
-void* ptrs[256];
+void* ptrs[1024];
 uintptr_t base = 0;
 
 // Minimalistic integer-to-string for system calls
