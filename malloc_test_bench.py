@@ -1,9 +1,10 @@
 import subprocess
 from malloc import PtMallocState
+import argparse
 
 import subprocess
 
-def run_differential_test(pt_malloc_instance, name, cmds):
+def run_differential_test(pt_malloc_instance: PtMallocState, name: str, cmds):
     # Build C input
     c_input = ""
     for cmd in cmds:
@@ -145,6 +146,14 @@ scenarios = {
 }
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("test_name", nargs="?")
+    args = parser.parse_args()
+    if args.test_name:
+        allocator = PtMallocState()
+        run_differential_test(allocator, args.test_name,  scenarios[args.test_name])
+        return
+
     for name, commands in scenarios.items():
         allocator = PtMallocState()
         run_differential_test(allocator, name, commands)
