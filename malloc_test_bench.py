@@ -142,6 +142,63 @@ scenarios = {
         # 4. Trigger Stash: Malloc 0x30.
         # It finds one in smallbin, then moves others to tcache.
         ("M", 0x30, 30),
+    ],
+    "fastbin_no_coalesce": [
+        # Chunks in fastbins (or tcache) should NOT merge with neighbors
+        ("M", 0x20, 0), ("M", 0x20, 1), ("M", 0x20, 2),
+        ("M", 0x10, 3), # Guard top
+        # Fill tcache so 0, 1, 2 must go to fastbins
+        *[("M", 0x20, i+10) for i in range(7)],
+        *[("F", i+10) for i in range(7)],
+
+        ("F", 0), ("F", 1), ("F", 2),
+        # If they coalesced, a 0x60 malloc would work.
+        # In glibc, they stay 0x20, so 0x60 comes from 'top'.
+        ("M", 0x60, 4),
+    ],
+
+    "largebin_sorting_and_fd_nextsize": [
+        ("M", 0x10, 17), # make sure to allocate tcache
+        # Largebins are sorted by size. We test if the correct 'closest fit' is picked.
+        ("M", 0x430, 0), ("M", 0x10, 1),  # Chunk A + Guard
+        ("M", 0x450, 2), ("M", 0x10, 3),  # Chunk B + Guard
+        ("M", 0x410, 4), ("M", 0x10, 5),  # Chunk C + Guard
+
+        # Move A, B, and C to Unsorted Bin
+        ("F", 0), ("F", 2), ("F", 4),
+
+        # Trigger binning into Largebins by requesting something that
+        # doesn't fit in Unsorted (or exceeds a threshold)
+        ("M", 0x600, 6),
+
+        # Now request a size that specifically fits the 'middle' largebin chunk
+        # To see if your skip-list (fd_nextsize) or sorting logic is correct
+        ("M", 0x420, 7), # Should pick the 0x430 chunk (index 0)
+    ],
+
+    "malloc_consolidate_trigger": [
+        # Fastbins are only merged when a "Large" allocation is requested.
+        ("M", 0x20, 0), ("M", 0x20, 1), ("M", 0x10, 2), # Guard
+        # Fill tcache
+        *[("M", 0x20, i+10) for i in range(7)],
+        *[("F", i+10) for i in range(7)],
+
+        ("F", 0), ("F", 1), # These sit in fastbins, uncoalesced.
+
+        # This large request triggers 'malloc_consolidate'
+        ("M", 0x410, 3),
+
+        # Now, 0 and 1 should be merged in the Unsorted Bin.
+        # A request for 0x40 should now be satisfied by the merged chunk 0+1.
+        ("M", 0x40, 4),
+    ],
+
+    "top_chunk_consolidation": [
+        # Freeing a chunk adjacent to 'top' should immediately merge it into top
+        # (Unless it's a fastbin/tcache chunk)
+        ("M", 0x100, 0),
+        ("F", 0), # No guard between chunk 0 and top.
+        ("M", 0x200, 1), # Should start at the same address as chunk 0
     ]
 }
 
