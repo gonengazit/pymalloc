@@ -91,12 +91,16 @@ class PtMallocState:
                     self.smallbins[smallbin_idx].remove(victim)
 
                 case BinType.LARGEBIN:
+
                     largebin_idx = self.largebin_index(victim.size)
                     bin = self.bin_at(largebin_idx)
                     bin.remove(victim)
 
                 case BinType.UNSORTED_BIN:
                     self.unsorted_bin.remove(victim)
+
+                case _:
+                    assert False
 
     def consolidate(self):
         for fb in self.fastbins:
@@ -109,17 +113,17 @@ class PtMallocState:
         if the chunk is next to the heap top - extend the top with it instead and return None"""
         if chunk.address in self.free_chunks_by_end:
             prev = self.free_chunks_by_end[chunk.address]
-
-            self.remove_from_free_chunks(prev, remove_from_bins=True)
-            self.remove_from_free_chunks(chunk)
-            chunk = self.merge_chunks(prev, chunk)
+            if prev.bin not in (BinType.TCACHE, BinType.FASTBIN):
+                self.remove_from_free_chunks(prev, remove_from_bins=True)
+                self.remove_from_free_chunks(chunk)
+                chunk = self.merge_chunks(prev, chunk)
 
         if chunk.address + chunk.size in self.free_chunks_by_start:
             next = self.free_chunks_by_start[chunk.address + chunk.size]
-
-            self.remove_from_free_chunks(chunk)
-            self.remove_from_free_chunks(next, remove_from_bins=True)
-            chunk = self.merge_chunks(chunk, next)
+            if next.bin not in (BinType.TCACHE, BinType.FASTBIN):
+                self.remove_from_free_chunks(chunk)
+                self.remove_from_free_chunks(next, remove_from_bins=True)
+                chunk = self.merge_chunks(chunk, next)
 
         elif chunk.address + chunk.size == self.top:
             self.top = chunk.address
