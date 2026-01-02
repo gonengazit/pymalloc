@@ -1,6 +1,7 @@
 from math import ceil
 from collections import deque
 from dataclasses import dataclass
+from enum import Enum
 MAX_FAST_SIZE=0xA0
 MAX_TCACHE_SIZE = 0x411 # 0x408 in glibc versions that aren't super-duper new (July 2025)
 MIN_LARGE_SIZE = 0x400
@@ -11,34 +12,45 @@ NBINS = 128
 NUM_SMALL_BINS = MIN_LARGE_SIZE//0x10
 NUM_LARGE_BINS = NBINS - NUM_SMALL_BINS
 
+class BinType(Enum):
+    TCACHE = "tcache"
+    FASTBIN = "fastbin"
+    SMALLBIN = "smallbin"
+    LARGEBIN = "largebin"
+    UNSORTED_BIN = "unsorted_bin"
+    UNKNOWN = "unknown"
+
 @dataclass
 class MallocChunk:
     size: int
     address: int
+    bin: BinType # which bin the chunk is in if it is free
+    def __repr__(self) -> str:
+        return f"MallocChunk(size={self.size:#x}, address={self.address:#x}, bin={self.bin})"
 
 
 #TODO: try to somehow deal with the fact that the tcache is allocated dynamically at runtime and thus can consume chunks from the unsorted bin. ugh
 class PtMallocState:
     def __init__(self) -> None:
-        self.tcache = [deque() for _ in range(0, MAX_TCACHE_SIZE, 0x10)] # stack
-        self.fastbins = [deque() for _ in range(0, MAX_FAST_SIZE, 0x10)] # stack
-        self.unsorted_bin = deque() # queue
-        self.smallbins = [deque() for _ in range(0, MIN_LARGE_SIZE, 0x10)] # queue
-        self.largebins = [[] for _ in range(NUM_LARGE_BINS)] # queue-ish - sorted smallest to largest
-        self.last_remainder = None
-        self.top = 0x400000
+        self.tcache: list[deque[MallocChunk]] = [deque() for _ in range(0, MAX_TCACHE_SIZE, 0x10)] # stack
+        self.fastbins: list[deque[MallocChunk]] = [deque() for _ in range(0, MAX_FAST_SIZE, 0x10)] # stack
+        self.unsorted_bin: deque[MallocChunk] = deque() # queue
+        self.smallbins: list[deque[MallocChunk]] = [deque() for _ in range(0, MIN_LARGE_SIZE, 0x10)] # queue
+        self.largebins: list[list[MallocChunk]] = [[] for _ in range(NUM_LARGE_BINS)] # queue-ish - sorted smallest to largest
+        self.last_remainder: MallocChunk | None = None
+        self.top = 0x000000
 
         # because our chunks aren't actually contiguous in memory - we'll store a big lookup table of all the chunks
-        self.free_chunks_by_start = {}
-        self.free_chunks_by_end = {}
-        self.allocated_chunks = {}
+        self.free_chunks_by_start: dict[int, MallocChunk]  = {}
+        self.free_chunks_by_end: dict[int, MallocChunk]  = {}
+        self.allocated_chunks: dict[int, MallocChunk] = {}
 
     def split_chunk(self, victim: MallocChunk, alloc_sz: int) ->tuple[MallocChunk, MallocChunk]:
         """split victim into 2 chunks - the first of size alloc_sz"""
         remainder_size = victim.size - alloc_sz
         assert remainder_size >= MIN_CHUNK_SIZE
-        remainder = MallocChunk(remainder_size, victim.address + alloc_sz)
-        split_victim = MallocChunk(alloc_sz, victim.address)
+        remainder = MallocChunk(remainder_size, victim.address + alloc_sz, BinType.UNKNOWN)
+        split_victim = MallocChunk(alloc_sz, victim.address, BinType.UNKNOWN)
 
         self.remove_from_free_chunks(victim)
         self.add_to_free_chunks(remainder)
@@ -48,10 +60,8 @@ class PtMallocState:
 
     def merge_chunks(self, l: MallocChunk, r: MallocChunk) -> MallocChunk:
         assert r.address == l.address + l.size
-        merged_chunk = MallocChunk(l.size + r.size, l.address)
+        merged_chunk = MallocChunk(l.size + r.size, l.address, BinType.UNKNOWN)
 
-        self.remove_from_free_chunks(l)
-        self.remove_from_free_chunks(r)
         self.add_to_free_chunks(merged_chunk)
 
         return merged_chunk
@@ -61,24 +71,32 @@ class PtMallocState:
         self.free_chunks_by_end[victim.address + victim.size] = victim
         pass
 
-    def remove_from_free_chunks(self, victim: MallocChunk):
+    def remove_from_free_chunks(self, victim: MallocChunk, remove_from_bins=False):
         del self.free_chunks_by_start[victim.address]
         del self.free_chunks_by_end[victim.address + victim.size]
         #TODO: improve the performance of this
-        for bin in self.tcache:
-            if victim in bin:
-                bin.remove(victim)
 
-        for bin in self.smallbins:
-            if victim in bin:
-                bin.remove(victim)
+        if remove_from_bins:
+            match victim.bin:
+                case BinType.TCACHE:
+                    tcache_idx = victim.size // 0x10
+                    self.tcache[tcache_idx].remove(victim)
 
-        for bin in self.largebins:
-            if victim in bin:
-                bin.remove(victim)
+                case BinType.FASTBIN:
+                    fastbin_idx = victim.size // 0x10
+                    self.fastbins[fastbin_idx].remove(victim)
 
-        if victim in self.unsorted_bin:
-            self.unsorted_bin.remove(victim)
+                case BinType.SMALLBIN:
+                    smallbin_idx = victim.size // 0x10
+                    self.smallbins[smallbin_idx].remove(victim)
+
+                case BinType.LARGEBIN:
+                    largebin_idx = self.largebin_index(victim.size)
+                    bin = self.bin_at(largebin_idx)
+                    bin.remove(victim)
+
+                case BinType.UNSORTED_BIN:
+                    self.unsorted_bin.remove(victim)
 
     def consolidate(self):
         for fb in self.fastbins:
@@ -91,11 +109,16 @@ class PtMallocState:
         if the chunk is next to the heap top - extend the top with it instead and return None"""
         if chunk.address in self.free_chunks_by_end:
             prev = self.free_chunks_by_end[chunk.address]
+
+            self.remove_from_free_chunks(prev, remove_from_bins=True)
+            self.remove_from_free_chunks(chunk)
             chunk = self.merge_chunks(prev, chunk)
 
         if chunk.address + chunk.size in self.free_chunks_by_start:
             next = self.free_chunks_by_start[chunk.address + chunk.size]
 
+            self.remove_from_free_chunks(chunk)
+            self.remove_from_free_chunks(next, remove_from_bins=True)
             chunk = self.merge_chunks(chunk, next)
 
         elif chunk.address + chunk.size == self.top:
@@ -171,7 +194,9 @@ class PtMallocState:
 
             # while we're here - fill the tcache from the smallbin
             while self.smallbins[smallbin_idx] and len(self.tcache[tcache_idx]) < MAX_TCACHE_LEN:
-                self.tcache[tcache_idx].append(self.smallbins[smallbin_idx].popleft())
+                back = self.smallbins[smallbin_idx].popleft()
+                back.bin = BinType.TCACHE
+                self.tcache[tcache_idx].append(back)
 
             return victim
 
@@ -187,6 +212,7 @@ class PtMallocState:
             if smallbin_idx < len(self.smallbins) and not self.unsorted_bin and victim == self.last_remainder and victim.size > sz + MIN_CHUNK_SIZE:
                 split_victim, remainder = self.split_chunk(victim, sz)
 
+                remainder.bin = BinType.UNSORTED_BIN
                 self.unsorted_bin.append(remainder)
                 self.last_remainder = remainder
 
@@ -195,6 +221,7 @@ class PtMallocState:
             # if the chunk exactly fits our request - fill the tcache, and return the chunk if the tcache is full
             if victim.size == sz:
                 if tcache_idx < len(self.tcache) and len(self.tcache[tcache_idx]) < MAX_TCACHE_LEN:
+                    victim.bin=BinType.TCACHE
                     self.tcache[tcache_idx].append(victim)
                     continue
                 else:
@@ -203,6 +230,7 @@ class PtMallocState:
             # put the chunk in the relvant bin
             if victim.size < MIN_LARGE_SIZE:
                 victim_smallbin_idx = victim.size // 0x10
+                victim.bin=BinType.SMALLBIN
                 self.smallbins[victim_smallbin_idx].append(victim)
             else:
                 victim_largebin_idx = self.largebin_index(victim.size)
@@ -211,6 +239,7 @@ class PtMallocState:
                 assert isinstance(bin, list)
                 # insert chunk into bin maintaining sorted order.
                 # if there bin already contains some chunks of the exact same time - we'll insert our new chunk to be 2nd with them
+                victim.bin=BinType.LARGEBIN
                 for i, chunk in enumerate(bin):
                     if chunk.size > sz:
                         bin.insert(i, victim)
@@ -251,6 +280,7 @@ class PtMallocState:
                     # Split chunk
                     if victim.size - sz >= MIN_CHUNK_SIZE:
                         victim, remainder = self.split_chunk(victim, sz)
+                        remainder.bin = BinType.UNSORTED_BIN
                         self.unsorted_bin.append(remainder)
 
                     return victim
@@ -282,6 +312,7 @@ class PtMallocState:
             # Split
             else:
                 split_victim, remainder = self.split_chunk(victim, sz)
+                remainder.bin = BinType.UNSORTED_BIN
                 self.unsorted_bin.append(remainder)
                 if sz < MIN_LARGE_SIZE:
                     self.last_remainder = remainder
@@ -289,8 +320,8 @@ class PtMallocState:
 
         # allocate from the top chunk
         # TODO: have the top actually have a size. if it fails - before we allocate from it we consolidate and retry
-        victim = MallocChunk(sz, self.top)
-        self.add_to_free_chunks(victim)
+        victim = MallocChunk(sz, self.top, BinType.UNKNOWN)
+        self.add_to_free_chunks(victim) # this is just because (non _) malloc expects to get a chunk in the free list
         self.top += sz
         return victim
 
@@ -303,11 +334,13 @@ class PtMallocState:
         if sz <= MAX_TCACHE_SIZE:
             tcache_idx = sz // 0x10
             if len(self.tcache[tcache_idx]) < MAX_TCACHE_LEN:
+                chunk.bin = BinType.TCACHE
                 self.tcache[tcache_idx].append(chunk)
                 return
 
         if sz <= MAX_FAST_SIZE:
             fastbin_idx = sz // 0x10
+            chunk.bin = BinType.FASTBIN
             return self.fastbins[fastbin_idx].append(chunk)
 
         # TODO: add support for mmaped chunks
@@ -320,11 +353,13 @@ class PtMallocState:
 
         if sz >= MIN_LARGE_SIZE:
             # if the chunk is large place it in the unsorted bin
+            chunk.bin = BinType.UNSORTED_BIN
             self.unsorted_bin.append(chunk)
         else:
             # if the chunk is small place it directly in the smallbin
             # this is only true since e2436d6f5aa47ce8da80c2ba0f59dfb9ffde08f3 (Nov 2024)
             smallbin_idx = sz // 0x10
+            chunk.bin = BinType.SMALLBIN
             self.smallbins[smallbin_idx].append(chunk)
         return
 
