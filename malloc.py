@@ -246,18 +246,24 @@ class PtMallocState:
                 # make sure we got a largebin
                 assert isinstance(bin, list)
                 # insert chunk into bin maintaining sorted order.
-                # if there bin already contains some chunks of the exact same time - we'll insert our new chunk to be 2nd with them
-                victim.bin=BinType.LARGEBIN
+                # if there bin already contains some chunks of the exact same size - we'll insert our new chunk to be 2nd to last of them
+                victim.bin = BinType.LARGEBIN
+                prev = None
                 for i, chunk in enumerate(bin):
-                    if chunk.size > sz:
-                        bin.insert(i, victim)
+                    if chunk.size > victim.size:
+                        if prev and prev.size == victim.size:
+                            bin.insert(i-1, victim)
+                        else:
+                            bin.insert(i, victim)
                         break
-                    elif chunk.size == sz:
-                        bin.insert(i+1, victim)
-                        break
-                # this will be the largest chunk in the bin
+                    prev = chunk
+
+                # this will be the largest (maybe tied) chunk in the bin
                 else:
-                    bin.append(victim)
+                    if prev and prev.size == victim.size:
+                        bin.insert(-1, victim)
+                    else:
+                        bin.append(victim)
 
             iters += 1
             MAX_ITERS = 10000
@@ -278,12 +284,14 @@ class PtMallocState:
             for i, chunk in enumerate(bin):
                 # found a large enough chunk in the bin
                 if chunk.size >= sz:
-
-                    # if there's multiple chunks of the same size - allocate the 2nd one
-                    if i + 1 < len(bin) and bin[i+1].size == chunk.size:
-                        victim = bin.pop(i+1)
-                    else:
+                    # If this is the only chunk in the bin of this size, return it
+                    if i + 1 >= len(bin) or bin[i+1].size != chunk.size:
                         victim = bin.pop(i)
+                    else:
+                        # if there's multiple chunks of the same size - allocate the 2nd to last one
+                        while i+1 < len(bin) and bin[i+1].size == chunk.size:
+                            i+=1
+                        victim = bin.pop(i-1)
 
                     # Split chunk
                     if victim.size - sz >= MIN_CHUNK_SIZE:
@@ -292,8 +300,6 @@ class PtMallocState:
                         self.unsorted_bin.append(remainder)
 
                     return victim
-
-
 
 
         # scan the bins from smallest to largest - looking for a fitting chunk
@@ -309,10 +315,10 @@ class PtMallocState:
                 idx += 1
                 continue
 
-            victim = bin[0]
+            victim = bin.pop(0) if isinstance(bin, list) else bin.popleft()
             assert victim.size >= sz
             remainder_size = victim.size - sz
-            bin.remove(victim)
+
             # Exhaust
             if remainder_size < MIN_CHUNK_SIZE:
                 return victim
@@ -370,26 +376,3 @@ class PtMallocState:
             chunk.bin = BinType.SMALLBIN
             self.smallbins[smallbin_idx].append(chunk)
         return
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
