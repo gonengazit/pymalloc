@@ -2,7 +2,7 @@ from math import ceil
 from collections import deque
 from dataclasses import dataclass
 MAX_FAST_SIZE=0xA0
-MAX_TCACHE_SIZE = 0x408
+MAX_TCACHE_SIZE = 0x411 # 0x408 in glibc versions that aren't super-duper new (July 2025)
 MIN_LARGE_SIZE = 0x400
 MIN_CHUNK_SIZE = 0x20
 MALLOC_HEADER_SIZE = 8
@@ -17,6 +17,7 @@ class MallocChunk:
     address: int
 
 
+#TODO: try to somehow deal with the fact that the tcache is allocated dynamically at runtime and thus can consume chunks from the unsorted bin. ugh
 class PtMallocState:
     def __init__(self) -> None:
         self.tcache = [deque() for _ in range(0, MAX_TCACHE_SIZE, 0x10)] # stack
@@ -322,6 +323,7 @@ class PtMallocState:
             self.unsorted_bin.append(chunk)
         else:
             # if the chunk is small place it directly in the smallbin
+            # this is only true since e2436d6f5aa47ce8da80c2ba0f59dfb9ffde08f3 (Nov 2024)
             smallbin_idx = sz // 0x10
             self.smallbins[smallbin_idx].append(chunk)
         return
