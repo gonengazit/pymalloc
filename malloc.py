@@ -11,6 +11,10 @@ MAX_TCACHE_LEN = 7
 NBINS = 128
 NUM_SMALL_BINS = MIN_LARGE_SIZE//0x10
 NUM_LARGE_BINS = NBINS - NUM_SMALL_BINS
+SIZEOF_TCACHE_PERTHREAD_STRUCT = 0x2f8
+
+MMAP_THRESHOLD = 128 * 1024
+TRIM_THRESHOLD = 128 * 1024
 
 class BinType(Enum):
     TCACHE = "tcache"
@@ -31,7 +35,7 @@ class MallocChunk:
 
 #TODO: try to somehow deal with the fact that the tcache is allocated dynamically at runtime and thus can consume chunks from the unsorted bin. ugh
 class PtMallocState:
-    def __init__(self) -> None:
+    def __init__(self, tcache_allocated=False) -> None:
         self.tcache: list[deque[MallocChunk]] = [deque() for _ in range(0, MAX_TCACHE_SIZE + 1, 0x10)] # stack
         self.fastbins: list[deque[MallocChunk]] = [deque() for _ in range(0, MAX_FAST_SIZE + 1, 0x10)] # stack
         self.unsorted_bin: deque[MallocChunk] = deque() # queue
@@ -44,6 +48,9 @@ class PtMallocState:
         self.free_chunks_by_start: dict[int, MallocChunk]  = {}
         self.free_chunks_by_end: dict[int, MallocChunk]  = {}
         self.allocated_chunks: dict[int, MallocChunk] = {}
+
+        # the tcache is only allocated on the first tcache-sized allocation
+        self.tcache_allocated = tcache_allocated
 
     def split_chunk(self, victim: MallocChunk, alloc_sz: int) ->tuple[MallocChunk, MallocChunk]:
         """split victim into 2 chunks - the first of size alloc_sz"""
@@ -181,8 +188,12 @@ class PtMallocState:
 
         # if we're small enough for the tcache and the relevant tcache is not empty - return the top element from it
         tcache_idx = sz // 0x10
-        if tcache_idx < len(self.tcache) and self.tcache[tcache_idx]:
-            return self.tcache[tcache_idx].pop()
+        if tcache_idx < len(self.tcache):
+            if not self.tcache_allocated:
+                self.tcache_allocated = True
+                self.malloc(SIZEOF_TCACHE_PERTHREAD_STRUCT)
+            if self.tcache[tcache_idx]:
+                return self.tcache[tcache_idx].pop()
 
         # if we're small enough for the fastbins and the relevant fastbin is not empty - return the top element from it
         fastbin_idx = sz // 0x10
@@ -340,6 +351,7 @@ class PtMallocState:
         return victim
 
     def free(self, addr: int) -> None:
+        #TODO: int_free_maybe_consolidate
         chunk = self.allocated_chunks.pop(addr)
         self.add_to_free_chunks(chunk)
 
