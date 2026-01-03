@@ -160,17 +160,16 @@ scenarios = {
     ],
 
     "unsorted_bin_consolidation": [
-        ('M', 0x20,  0), # allocate the tcache now
-        ('M', 0x410, 1), # Large enough to bypass tcache/fastbins
-        ('M', 0x410, 2), # Prevent consolidation with top
+        ('M', 0x420, 0), # Large enough to bypass tcache/fastbins
+        ('M', 0x420, 1), # Prevent consolidation with top
         ('F', 0),        # Goes to unsorted bin
         ('M', 0x100, 3), # Causes 0 to be split. Remainder stays in unsorted.
     ],
 
     "backward_coalescing": [
-        ('M', 0x400, 0),
-        ('M', 0x400, 1),
-        ('M', 0x400, 2),
+        ('M', 0x420, 0),
+        ('M', 0x420, 1),
+        ('M', 0x420, 2),
         ('M', 0x10, 3),  # Guard
         ('F', 0),        # Unsorted
         ('F', 1),        # Should merge with 0
@@ -200,12 +199,12 @@ scenarios = {
     "fastbin_overflow_to_unsorted": [
         *[("M", 0x20, i) for i in range(9)],
         *[("F", i) for i in range(8)], # 7 to tcache, 1 to fastbin
-        ("M", 0x400, 9),               # Allocate large to trigger consolidation/binning
+        ("M", 0x420, 9),               # Allocate large to trigger consolidation/binning
         ("M", 0x20, 10),               # Should pull from tcache
     ],
 
     "unsorted_bin_splitting": [
-        ("M", 0x400, 0),               # Chunk A
+        ("M", 0x420, 0),               # Chunk A
         ("M", 0x10, 1),                # Guard (prevent top merge)
         ("F", 0),                      # A -> Unsorted Bin
         ("M", 0x100, 2),               # Should split A. Remainder stays in Unsorted.
@@ -213,7 +212,7 @@ scenarios = {
     ],
 
     "coalescing_backward_forward": [
-        ("M", 0x400, 0), ("M", 0x400, 1), ("M", 0x400, 2),
+        ("M", 0x420, 0), ("M", 0x420, 1), ("M", 0x420, 2),
         ("M", 0x10, 3),                # Guard
         ("F", 1),                      # Middle to Unsorted
         ("F", 0),                      # Merge 0 into 1
@@ -228,7 +227,7 @@ scenarios = {
         ("M", 0x30, 7), ("M", 0x30, 8),
         ("M", 0x10, 9),                # Guard
         ("F", 7), ("F", 8),            # Into Unsorted
-        ("M", 0x400, 10),              # Trigger binning: 7 and 8 move to Smallbins
+        ("M", 0x420, 10),              # Trigger binning: 7 and 8 move to Smallbins
         # 3. Empty tcache
         *[("M", 0x30, 20+i) for i in range(7)],
         # 4. Trigger Stash: Malloc 0x30.
@@ -250,7 +249,6 @@ scenarios = {
     ],
 
     "largebin_sorting_and_fd_nextsize": [
-        ("M", 0x10, 17), # make sure to allocate tcache
         # Largebins are sorted by size. We test if the correct 'closest fit' is picked.
         ("M", 0x430, 0), ("M", 0x10, 1),  # Chunk A + Guard
         ("M", 0x450, 2), ("M", 0x10, 3),  # Chunk B + Guard
@@ -294,7 +292,6 @@ scenarios = {
     ],
     "stale_last_remainder": [
         # freeing a chunk that was once the last remainder should bring it back to be the last remainder
-        ("M", 0x10, 0), # allocate tcache
         ("M", 0x700, 1),
         ("M", 0x1b00, 2),
         ("M", 0x10, 3),
@@ -307,7 +304,6 @@ scenarios = {
 
     ],
     "last_remainder_basic_split": [
-        ("M", 0x20, 17), # make sure the cache is allocated
         # 1. Setup: Get a chunk into the Unsorted Bin
         ("M", 0x420, 0),
         ("M", 0x20, 1),   # Guard chunk to prevent top-consolidation
@@ -336,7 +332,6 @@ scenarios = {
     ],
 
     "last_remainder_locality_priority": [
-        ("M", 0x20, 17), # make sure the cache is allocated
         # 1. Put TWO chunks in Unsorted Bin
         ("M", 0x420, 0), ("M", 0x20, 1), # A + Guard
         ("M", 0x420, 2), ("M", 0x20, 3), # B + Guard
@@ -355,7 +350,6 @@ scenarios = {
     ],
 
     "last_remainder_tcache_bypass": [
-        ("M", 0x20, 17), # make sure the cache is allocated
         # Since tcache exists, we must fill it to see Unsorted Bin behavior
         # for sizes that would otherwise fit in tcache.
         *[("M", 0x80, i) for i in range(7)],
@@ -368,7 +362,6 @@ scenarios = {
         ("M", 0x80, 10), # Should come from last_remainder
     ],
     "largebin_ordering": [
-        ('M', 0x10, 0), # allocate tcache
         ('M', 0x1030, 1),
         ('M', 0x10, 2),
         ('M', 0x1000, 3),
