@@ -22,6 +22,7 @@ class BinType(Enum):
     SMALLBIN = "smallbin"
     LARGEBIN = "largebin"
     UNSORTED_BIN = "unsorted_bin"
+    TOP = "top"
     UNKNOWN = "unknown"
 
 @dataclass
@@ -42,7 +43,7 @@ class PtMallocState:
         self.smallbins: list[deque[MallocChunk]] = [deque() for _ in range(0, MIN_LARGE_SIZE, 0x10)] # queue
         self.largebins: list[list[MallocChunk]] = [[] for _ in range(NUM_LARGE_BINS)] # queue-ish - sorted smallest to largest
         self.last_remainder: MallocChunk | None = None
-        self.top = 0x000000
+        self.top = MallocChunk(0, 0x0, BinType.TOP)
 
         # because our chunks aren't actually contiguous in memory - we'll store a big lookup table of all the chunks
         self.free_chunks_by_start: dict[int, MallocChunk]  = {}
@@ -136,8 +137,8 @@ class PtMallocState:
                 self.remove_from_free_chunks(next, remove_from_bins=True)
                 chunk = self.merge_chunks(chunk, next)
 
-        elif chunk.address + chunk.size == self.top:
-            self.top = chunk.address
+        elif chunk.address + chunk.size == self.top.address:
+            self.top = MallocChunk(self.top.size + chunk.size, chunk.address, BinType.TOP)
             self.remove_from_free_chunks(chunk)
             return None
 
@@ -344,11 +345,23 @@ class PtMallocState:
                 return split_victim
 
         # allocate from the top chunk
-        # TODO: have the top actually have a size. if it fails - before we allocate from it we consolidate and retry
-        victim = MallocChunk(sz, self.top, BinType.UNKNOWN)
-        self.add_to_free_chunks(victim) # this is just because (non _) malloc expects to get a chunk in the free list
-        self.top += sz
-        return victim
+
+        if self.top.size >= sz + MIN_CHUNK_SIZE:
+            victim = MallocChunk(sz, self.top.address, BinType.UNKNOWN)
+            self.add_to_free_chunks(victim) # this is just because (non _) malloc expects to get a chunk in the free list
+            self.top = MallocChunk(self.top.size - sz, self.top.address + sz, BinType.TOP)
+            return victim
+
+        # if we have anything in the fastbins - consolidate, then resort and scan bins
+        elif any(self.fastbins):
+            self.consolidate()
+            assert False
+        else:
+            self.sysmalloc(sz)
+
+
+
+
 
     def free(self, addr: int) -> None:
         #TODO: int_free_maybe_consolidate
