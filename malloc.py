@@ -15,6 +15,12 @@ SIZEOF_TCACHE_PERTHREAD_STRUCT = 0x2f8
 
 MMAP_THRESHOLD = 128 * 1024
 TRIM_THRESHOLD = 128 * 1024
+FASTBIN_CONSOLIDATION_THRESHOLD = 65536
+
+# in the glibc source code - this is 0 but it is actually a compiler tunable. it seems like it is set to 0x20000 by most distros
+# you can check the value using /lib64/ld-linux-x86-64.so.2 --list-tunables | grep top_pad
+TOP_PAD = 0x20000
+PAGE_SIZE = 0x1000
 
 class BinType(Enum):
     TCACHE = "tcache"
@@ -22,6 +28,7 @@ class BinType(Enum):
     SMALLBIN = "smallbin"
     LARGEBIN = "largebin"
     UNSORTED_BIN = "unsorted_bin"
+    TOP = "top"
     UNKNOWN = "unknown"
 
 @dataclass
@@ -35,14 +42,14 @@ class MallocChunk:
 
 #TODO: try to somehow deal with the fact that the tcache is allocated dynamically at runtime and thus can consume chunks from the unsorted bin. ugh
 class PtMallocState:
-    def __init__(self, tcache_allocated=False) -> None:
+    def __init__(self, top=0, top_size=0, tcache_allocated=False) -> None:
         self.tcache: list[deque[MallocChunk]] = [deque() for _ in range(0, MAX_TCACHE_SIZE + 1, 0x10)] # stack
         self.fastbins: list[deque[MallocChunk]] = [deque() for _ in range(0, MAX_FAST_SIZE + 1, 0x10)] # stack
         self.unsorted_bin: deque[MallocChunk] = deque() # queue
         self.smallbins: list[deque[MallocChunk]] = [deque() for _ in range(0, MIN_LARGE_SIZE, 0x10)] # queue
         self.largebins: list[list[MallocChunk]] = [[] for _ in range(NUM_LARGE_BINS)] # queue-ish - sorted smallest to largest
         self.last_remainder: MallocChunk | None = None
-        self.top = 0x000000
+        self.top = MallocChunk(top_size, top, BinType.TOP)
 
         # because our chunks aren't actually contiguous in memory - we'll store a big lookup table of all the chunks
         self.free_chunks_by_start: dict[int, MallocChunk]  = {}
@@ -136,8 +143,8 @@ class PtMallocState:
                 self.remove_from_free_chunks(next, remove_from_bins=True)
                 chunk = self.merge_chunks(chunk, next)
 
-        elif chunk.address + chunk.size == self.top:
-            self.top = chunk.address
+        elif chunk.address + chunk.size == self.top.address:
+            self.top = MallocChunk(self.top.size + chunk.size, chunk.address, BinType.TOP)
             self.remove_from_free_chunks(chunk)
             return None
 
@@ -344,14 +351,48 @@ class PtMallocState:
                 return split_victim
 
         # allocate from the top chunk
-        # TODO: have the top actually have a size. if it fails - before we allocate from it we consolidate and retry
-        victim = MallocChunk(sz, self.top, BinType.UNKNOWN)
-        self.add_to_free_chunks(victim) # this is just because (non _) malloc expects to get a chunk in the free list
-        self.top += sz
+
+        if self.top.size >= sz + MIN_CHUNK_SIZE:
+            victim = MallocChunk(sz, self.top.address, BinType.UNKNOWN)
+            self.add_to_free_chunks(victim) # this is just because (non _) malloc expects to get a chunk in the free list
+            self.top = MallocChunk(self.top.size - sz, self.top.address + sz, BinType.TOP)
+            return victim
+
+        # if we have anything in the fastbins - consolidate, then resort and scan bins
+        elif any(self.fastbins):
+            self.consolidate()
+            assert False
+        else:
+            return self.sysmalloc(sz)
+
+
+    def sysmalloc(self, sz: int) -> MallocChunk:
+        if sz >= MMAP_THRESHOLD:
+            #TODO: mmaped chunks
+            assert False
+
+
+        alloc_size = sz + MIN_CHUNK_SIZE + TOP_PAD - self.top.size
+
+        # align alloc_size up to a multiple of a page
+        alloc_size = (alloc_size + PAGE_SIZE - 1)& ~(PAGE_SIZE-1)
+
+        # here malloc would call sbrk(size) - effectively allocating size bytes to top
+        self.top.size += alloc_size
+
+
+        assert self.top.size >= sz + MIN_CHUNK_SIZE
+
+        victim = MallocChunk(sz, self.top.address, BinType.UNKNOWN)
+        self.add_to_free_chunks(victim)
+        self.top = MallocChunk(self.top.size - sz, self.top.address + sz, BinType.TOP)
+
         return victim
 
+
+
+
     def free(self, addr: int) -> None:
-        #TODO: int_free_maybe_consolidate
         chunk = self.allocated_chunks.pop(addr)
         self.add_to_free_chunks(chunk)
 
@@ -374,17 +415,36 @@ class PtMallocState:
         chunk = self.coalesce_chunk(chunk)
         # coalsced with top
         if chunk is None:
-            return
-        sz = chunk.size
-
-        if sz >= MIN_LARGE_SIZE:
-            # if the chunk is large place it in the unsorted bin
-            chunk.bin = BinType.UNSORTED_BIN
-            self.unsorted_bin.append(chunk)
+            sz = self.top.size
         else:
-            # if the chunk is small place it directly in the smallbin
-            # this is only true since e2436d6f5aa47ce8da80c2ba0f59dfb9ffde08f3 (Nov 2024)
-            smallbin_idx = sz // 0x10
-            chunk.bin = BinType.SMALLBIN
-            self.smallbins[smallbin_idx].append(chunk)
+            sz = chunk.size
+
+            if sz >= MIN_LARGE_SIZE:
+                # if the chunk is large place it in the unsorted bin
+                chunk.bin = BinType.UNSORTED_BIN
+                self.unsorted_bin.append(chunk)
+            else:
+                # if the chunk is small place it directly in the smallbin
+                # this is only true since e2436d6f5aa47ce8da80c2ba0f59dfb9ffde08f3 (Nov 2024)
+                smallbin_idx = sz // 0x10
+                chunk.bin = BinType.SMALLBIN
+                self.smallbins[smallbin_idx].append(chunk)
+
+        # if we freed a large chunk - consolidate, then trim if top is greater than the trim threshold
+        if sz >= FASTBIN_CONSOLIDATION_THRESHOLD:
+            self.consolidate()
+            if self.top.size >= TRIM_THRESHOLD:
+                self.systrim(TOP_PAD)
+
         return
+
+    def systrim(self, pad: int) -> None:
+        top_size = self.top.size
+        top_area = top_size - MIN_CHUNK_SIZE
+
+        if top_area <= pad:
+            return
+
+        extra = (top_area - pad)&~(PAGE_SIZE-1)
+        self.top.size -= extra
+
