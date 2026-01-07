@@ -16,6 +16,11 @@ SIZEOF_TCACHE_PERTHREAD_STRUCT = 0x2f8
 MMAP_THRESHOLD = 128 * 1024
 TRIM_THRESHOLD = 128 * 1024
 
+# in the glibc source code - this is 0 but it is actually a compiler tunable. it seems like it is set to 0x20000 by most distros
+# you can check the value using /lib64/ld-linux-x86-64.so.2 --list-tunables | grep top_pad
+TOP_PAD = 0x20000
+PAGE_SIZE = 0x1000
+
 class BinType(Enum):
     TCACHE = "tcache"
     FASTBIN = "fastbin"
@@ -360,11 +365,35 @@ class PtMallocState:
             self.sysmalloc(sz)
 
 
+    def sysmalloc(self, sz: int) -> MallocChunk:
+        if sz >= MMAP_THRESHOLD:
+            #TODO: mmaped chunks
+            assert False
+
+
+        alloc_size = sz + MIN_CHUNK_SIZE + TOP_PAD - self.top.size
+
+        # align alloc_size up to a multiple of a page
+        alloc_size = (alloc_size + PAGE_SIZE - 1)& ~PAGE_SIZE
+
+        # here malloc would call sbrk(size) - effectively allocating size bytes to top
+        self.top.size += alloc_size
+
+
+        assert self.top.size >= sz + MIN_CHUNK_SIZE
+
+        victim = MallocChunk(sz, self.top.address, BinType.UNKNOWN)
+        self.add_to_free_chunks(victim)
+        self.top = MallocChunk(self.top.size - sz, self.top.address + sz, BinType.TOP)
+
+        return victim
+
 
 
 
     def free(self, addr: int) -> None:
         #TODO: int_free_maybe_consolidate
+        #TODO: systrim
         chunk = self.allocated_chunks.pop(addr)
         self.add_to_free_chunks(chunk)
 
