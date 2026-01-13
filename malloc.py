@@ -16,6 +16,7 @@ SIZEOF_TCACHE_PERTHREAD_STRUCT = 0x2f8
 MMAP_THRESHOLD = 128 * 1024
 TRIM_THRESHOLD = 128 * 1024
 FASTBIN_CONSOLIDATION_THRESHOLD = 65536
+MMAP_SENTINEL = 0x800000000000
 
 # in the glibc source code - this is 0 but it is actually a compiler tunable. it seems like it is set to 0x20000 by most distros
 # you can check the value using /lib64/ld-linux-x86-64.so.2 --list-tunables | grep top_pad
@@ -29,6 +30,7 @@ class BinType(Enum):
     LARGEBIN = "largebin"
     UNSORTED_BIN = "unsorted_bin"
     TOP = "top"
+    MMAP = "mmap"
     UNKNOWN = "unknown"
 
 @dataclass
@@ -184,9 +186,12 @@ class PtMallocState:
 
     def malloc(self, sz: int) -> int:
         chunk = self._malloc(sz)
-        self.remove_from_free_chunks(chunk)
-        self.allocated_chunks[chunk.address] = chunk
-        return chunk.address
+        if chunk.bin != BinType.MMAP:
+            self.remove_from_free_chunks(chunk)
+            self.allocated_chunks[chunk.address] = chunk
+            return chunk.address
+        else:
+            return MMAP_SENTINEL
 
     def _malloc(self, sz: int) -> MallocChunk:
         # make size the actual chunk allocation size, rounded to 0x10 and including heap metadata
@@ -368,8 +373,7 @@ class PtMallocState:
 
     def sysmalloc(self, sz: int) -> MallocChunk:
         if sz >= MMAP_THRESHOLD:
-            #TODO: mmaped chunks
-            assert False
+            return MallocChunk(0, 0, BinType.MMAP)
 
 
         alloc_size = sz + MIN_CHUNK_SIZE + TOP_PAD - self.top.size
@@ -393,6 +397,8 @@ class PtMallocState:
 
 
     def free(self, addr: int) -> None:
+        if addr == MMAP_SENTINEL:
+            return
         chunk = self.allocated_chunks.pop(addr)
         self.add_to_free_chunks(chunk)
 
@@ -409,8 +415,6 @@ class PtMallocState:
             fastbin_idx = sz // 0x10
             chunk.bin = BinType.FASTBIN
             return self.fastbins[fastbin_idx].append(chunk)
-
-        # TODO: add support for mmaped chunks
 
         chunk = self.coalesce_chunk(chunk)
         # coalsced with top

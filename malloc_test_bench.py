@@ -1,5 +1,5 @@
 import subprocess
-from malloc import PtMallocState
+from malloc import MMAP_SENTINEL, PtMallocState
 from math import ceil
 import argparse
 
@@ -85,10 +85,11 @@ def run_differential_test(name: str, cmds):
 
     pt_malloc_instance = PtMallocState(top=top, top_size=top_size)
 
-
-
     # Run Python Impl
     py_ptrs = {}
+
+    # we assume the first chunk allocated is not mmaped
+    c_base = int(c_addrs[0])
 
     try:
         for i, line in enumerate(c_addrs):
@@ -98,13 +99,15 @@ def run_differential_test(name: str, cmds):
                 py_ptr = pt_malloc_instance.malloc(size)
 
                 c_ptr = int(line)
-
-                assert py_ptr == c_ptr, f"Mismatch at step {i}: C={c_ptr:#x}, Py={py_ptr:#x}"
+                # mmaped page
+                if c_ptr - c_base > 0x100000000:
+                    assert py_ptr == MMAP_SENTINEL, f"Mismatch at step {i}: C is mmap'd and python is not"
+                else:
+                    assert py_ptr == c_ptr, f"Mismatch at step {i}: C={c_ptr:#x}, Py={py_ptr:#x}"
                 py_ptrs[idx] = py_ptr
             else:
                 idx = cmd[1]
                 pt_malloc_instance.free(py_ptrs[idx])
-                # print(" ", cmd[0], cmd[1])
         print(f"✅ {name}: PASSED")
         return True
     except Exception as e:
@@ -375,7 +378,21 @@ scenarios = {
          ('M', 6000, 8),
          ('F', 7),
          ('F', 8),
-         ('M', 48, 9)]
+         ('M', 48, 9)],
+    "mmaped_chunk": [
+        ("M", 0x20, 0),
+        ("M", 0x21000, 1),
+        ("M", 0x420, 2),
+    ],
+    "sysmalloc_default_expansion": [
+        # 1. First allocation establishes the initial heap/top
+        ("M", 0x420, 0),
+        # Allocate large chunks to exhaust top - but not enough to force an mmap
+        ("M", 0x10000, 1),
+        ("M", 0x10000, 2),
+        # 3. Allocation after expansion
+        ("M", 0x420, 3),
+    ],
 }
 
 def reduce_test(cmds):
