@@ -1,5 +1,6 @@
 import subprocess
 from malloc import PtMallocState
+from math import ceil
 import argparse
 
 import subprocess
@@ -53,7 +54,7 @@ class MallocFuzzer:
 
         return commands
 
-def run_differential_test(pt_malloc_instance: PtMallocState, name: str, cmds):
+def run_differential_test(name: str, cmds):
     # Build C input
     c_input = ""
     for cmd in cmds:
@@ -65,29 +66,40 @@ def run_differential_test(pt_malloc_instance: PtMallocState, name: str, cmds):
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     # print(c_input)
     stdout, _ = proc.communicate(input=c_input.encode())
-    c_offsets = stdout.decode().splitlines()
+    c_addrs = stdout.decode().splitlines()
+    top = int(c_addrs[0])
+
+    first_allocation_size = ceil((cmds[0][1] + 8)/0x10) * 0x10
+    first_allocation_size = max(0x20, first_allocation_size)
+
+    if first_allocation_size < 0x411:
+        top -= 0x300
+
+    # this assumes that between 0x1000 and 0x2000 bytes are allocated after top is first padded
+    # we know that top ends in a page aligned allocation and was originally 0x21000 bytes
+    # subtract 0x10 because of the first allocation containing metadata
+    size_till_next_page = ((top-0x10+0xfff)&~0xfff)-top
+    top_size = 0x19000 + size_till_next_page
+    top_size -= size_till_next_page - first_allocation_size
+
+
+    pt_malloc_instance = PtMallocState(top=top, top_size=top_size)
+
+
 
     # Run Python Impl
     py_ptrs = {}
-    base_addr = None
 
     try:
-        for i, line in enumerate(c_offsets):
+        for i, line in enumerate(c_addrs):
             cmd = cmds[i]
             if cmd[0] == 'M':
                 size, idx = cmd[1], cmd[2]
                 py_ptr = pt_malloc_instance.malloc(size)
 
-                if base_addr is None:
-                    base_addr = py_ptr
-                    # Synchronize your 'top' if the first malloc
-                    # results in a specific heap layout
+                c_ptr = int(line)
 
-                py_offset = py_ptr - base_addr
-                c_offset = int(line)
-                # print(idx, cmd[0], hex(size), hex(py_offset), hex(c_offset))
-
-                assert py_offset == c_offset, f"Mismatch: C={c_offset:#x}, Py={py_offset:#x}"
+                assert py_ptr == c_ptr, f"Mismatch at step {i}: C={c_ptr:#x}, Py={py_ptr:#x}"
                 py_ptrs[idx] = py_ptr
             else:
                 idx = cmd[1]
@@ -99,48 +111,22 @@ def run_differential_test(pt_malloc_instance: PtMallocState, name: str, cmds):
         print(f"❌ {name}: FAILED - {e}")
         return False
 
-def run_fuzzer_test(pt_malloc_instance, num_ops=1000):
+def run_fuzzer_test(num_ops=1000):
     fuzzer = MallocFuzzer()
     commands = fuzzer.generate_commands(num_ops)
 
-    # 1. Run C Harness to get "Golden Trace"
-    input_str = "".join([f"M {c[1]} {c[2]} " if c[0]=='M' else f"F {c[1]} " for c in commands])
-    proc = subprocess.Popen(['./harness'], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    stdout, _ = proc.communicate(input=input_str.encode())
-    c_offsets = stdout.decode().splitlines()
+    return run_differential_test("fuzz", commands)
 
-    # 2. Run Python and Compare
-    py_ptrs = {}
-    base_addr = None
+def get_reduced_fail(num_ops=500):
+    while True:
+        fuzzer = MallocFuzzer()
+        commands = fuzzer.generate_commands(num_ops)
+        commands = [("M", 0x1f000, 1020)] + commands
+        if not run_differential_test("fuzz", commands):
+            break
 
-    for i, (line, cmd) in enumerate(zip(c_offsets, commands)):
-        try:
-            if cmd[0] == 'M':
-                size, idx = cmd[1], cmd[2]
-                py_ptr = pt_malloc_instance.malloc(size)
+    reduce_test(commands)
 
-                if base_addr is None:
-                    base_addr = py_ptr
-
-                py_offset = py_ptr - base_addr
-                c_offset = int(line)
-
-                # print(cmd[0], hex(size), idx, hex(py_offset), hex(c_offset))
-                if py_offset != c_offset:
-                    raise ValueError(f"Offset mismatch! Step {i}: C={c_offset:#x}, Py={py_offset:#x}")
-
-                py_ptrs[idx] = py_ptr
-            else:
-                # print(cmd[0], cmd[1])
-                idx = cmd[1]
-                pt_malloc_instance.free(py_ptrs[idx])
-
-        except Exception as e:
-            print(f"CRASH AT STEP {i}: {cmd}")
-            print(f"Error: {e}")
-            return False
-            # Here you would call pt_malloc_instance.dump_state()
-    return True
 
 # Define scenarios to exercise the logic
 scenarios = {
@@ -369,24 +355,80 @@ scenarios = {
         ('F', 3),
         ('F', 1),
         ('M', 0x20, 5), # should allocate from the 0x1000 chunk
-    ]
+    ],
+    "int_free_maybe_consolidate":
+        [('M', 96, 0),
+         ('M', 96, 1),
+         ('M', 96, 2),
+         ('M', 96, 3),
+         ('M', 96, 4),
+         ('M', 96, 5),
+         ('M', 96, 6),
+         ('M', 96, 7),
+         ('F', 0),
+         ('F', 1),
+         ('F', 2),
+         ('F', 3),
+         ('F', 4),
+         ('F', 5),
+         ('F', 6),
+         ('M', 6000, 8),
+         ('F', 7),
+         ('F', 8),
+         ('M', 48, 9)]
 }
+
+def reduce_test(cmds):
+    good_cmds = cmds
+    cnt=0
+    while cnt<1000:
+        cnt+=1
+        rm = random.choice(cmds)
+        cmds = []
+        for cmd in good_cmds:
+            if cmd==rm:
+                continue
+            if rm[0]=='M' and cmd[-1]==rm[-1]:
+                continue
+            cmds.append(cmd)
+
+        if not run_differential_test("tst", cmds):
+            cnt=0
+            good_cmds = cmds
+
+    simplified_cmds=[]
+    idxs={}
+    for cmd in good_cmds:
+        cmd =list(cmd)
+        if cmd[0]=="M":
+            cmd[1]=cmd[1]+7 - (cmd[1]+7)%16
+        if cmd[-1] not in idxs:
+            idxs[cmd[-1]]=len(idxs)
+        cmd[-1]=idxs[cmd[-1]]
+        cmd = tuple(cmd)
+        simplified_cmds.append(cmd)
+    print(simplified_cmds, len(simplified_cmds))
+    return cmds
+
+
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("test_name", nargs="?", choices=list(scenarios.keys()) + ["fuzz"])
     args = parser.parse_args()
     if args.test_name:
-        allocator = PtMallocState()
         if args.test_name == "fuzz":
-            run_fuzzer_test(allocator)
+            run_fuzzer_test()
         else:
-            run_differential_test(allocator, args.test_name,  scenarios[args.test_name])
+            run_differential_test(args.test_name,  scenarios[args.test_name])
         return
 
     for name, commands in scenarios.items():
-        allocator = PtMallocState()
-        run_differential_test(allocator, name, commands)
+        run_differential_test(name, commands)
+    # get_reduced_fail()
+
+
 
 
 

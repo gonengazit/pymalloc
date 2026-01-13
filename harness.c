@@ -58,10 +58,7 @@ int main() {
             int idx = parse_int(&cursor);
             void* p = malloc(size);
 
-            if (base == 0) base = (uintptr_t)p;
-
-            if (!p) write(STDOUT_FILENO, "NULL\n", 5);
-            else write_long((uintptr_t)p - base);
+            write_long((uintptr_t)p);
 
             ptrs[idx] = p;
         } else if (op == 'F') {
