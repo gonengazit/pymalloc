@@ -75,11 +75,11 @@ def run_differential_test(name: str, cmds):
     if first_allocation_size < 0x411:
         top -= 0x300
 
-    # this assumes that between 0x1000 and 0x2000 bytes are allocated after top is first padded
+    # this assumes that between 0x0000 and 0x1000 bytes are allocated after top is first padded
     # we know that top ends in a page aligned allocation and was originally 0x21000 bytes
     # subtract 0x10 because of the first allocation containing metadata
     size_till_next_page = ((top-0x10+0xfff)&~0xfff)-top
-    top_size = 0x19000 + size_till_next_page
+    top_size = 0x20000 + size_till_next_page
     top_size -= size_till_next_page - first_allocation_size
 
 
@@ -99,6 +99,7 @@ def run_differential_test(name: str, cmds):
                 py_ptr = pt_malloc_instance.malloc(size)
 
                 c_ptr = int(line)
+                # print(size, idx, cmd, hex(py_ptr), hex(c_ptr))
                 # mmaped page
                 if c_ptr - c_base > 0x100000000:
                     assert py_ptr == MMAP_SENTINEL, f"Mismatch at step {i}: C is mmap'd and python is not"
@@ -393,6 +394,33 @@ scenarios = {
         # 3. Allocation after expansion
         ("M", 0x420, 3),
     ],
+    "top_size_exact":
+    # this test coalesces with top pretty close to it being 65536 -so if we calculated it wrong we'll probably fail
+    [
+        ('M', 112, 0),
+        ('M', 112, 1),
+        ('M', 112, 5),
+        ('M', 112, 7),
+        ('M', 112, 8),
+        ('M', 112, 9),
+        ('M', 112, 10),
+        ('M', 112, 11),
+        ('F', 1),
+        ('F', 5),
+        ('F', 7),
+        ('F', 8),
+        ('F', 9),
+        ('F', 10),
+        ('F', 11),
+        ('M', 28996, 2),
+        ('M', 112, 19),
+        ('M', 6320, 20),
+        ('M', 2880, 21),
+        ('F', 19),
+        ('F', 0),
+        ('F', 21),
+        ('M', 96, 22)
+    ]
 }
 
 def reduce_test(cmds):
@@ -432,23 +460,26 @@ def reduce_test(cmds):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("test_name", nargs="?", choices=list(scenarios.keys()) + ["fuzz"])
+    parser.add_argument("test_name", nargs="?", choices=list(scenarios.keys()) + ["fuzz", "search_fail"])
     args = parser.parse_args()
     if args.test_name:
         if args.test_name == "fuzz":
             run_fuzzer_test()
+        elif args.test_name == "search_fail":
+            get_reduced_fail()
         else:
             run_differential_test(args.test_name,  scenarios[args.test_name])
         return
 
     for name, commands in scenarios.items():
         run_differential_test(name, commands)
-    # get_reduced_fail()
+
+# [('M', 48, 0), ('M', 832, 1), ('M', 5648, 2), ('M', 7296, 3), ('M', 208, 4), ('F', 2), ('M', 784, 5), ('M', 112, 6), ('M', 7120, 7), ('M', 64, 8), ('M', 464, 9), ('M', 464, 10), ('M', 272, 11), ('M', 944, 12), ('M', 5936, 13), ('M', 64, 14), ('M', 1008, 15), ('M', 4432, 16), ('M', 992, 17), ('M', 64, 18), ('M', 704, 19), ('M', 320, 20), ('M', 64, 21), ('F', 16), ('M', 480, 22), ('M', 64, 23), ('M', 64, 24), ('M', 64, 25), ('M', 64, 26), ('F', 14), ('F', 8), ('F', 21), ('F', 24), ('M', 816, 27), ('M', 64, 28), ('F', 23), ('F', 25), ('F', 18), ('F', 26), ('M', 3552, 29), ('M', 3584, 30), ('M', 800, 31), ('F', 28), ('F', 30), ('M', 80, 32)] 45
 
 
+# [('M', 126976, 0), ('M', 4064, 1), ('M', 80, 2), ('M', 80, 3), ('M', 2608, 4), ('M', 7504, 5), ('M', 80, 6), ('M', 80, 7), ('M', 7504, 8), ('M', 80, 9), ('M', 80, 10), ('M', 80, 11), ('M', 80, 12), ('F', 11), ('F', 3), ('M', 7024, 13), ('F', 12), ('F', 9), ('F', 7), ('F', 2), ('M', 7472, 14), ('F', 6), ('M', 6144, 15), ('F', 10), ('F', 15), ('M', 32, 16)] 26
 
-
-
+# [('M', 112, 0), ('M', 112, 1), ('M', 384, 2), ('M', 400, 3), ('M', 64, 4), ('M', 112, 5), ('M', 6944, 6), ('M', 112, 7), ('M', 112, 8), ('M', 112, 9), ('M', 112, 10), ('M', 112, 11), ('F', 7), ('F', 10), ('M', 80, 12), ('F', 8), ('F', 11), ('F', 0), ('F', 1), ('M', 496, 13), ('M', 7360, 14), ('F', 5), ('M', 8016, 15), ('M', 3600, 16), ('M', 560, 17), ('M', 816, 18), ('M', 112, 19), ('M', 6320, 20), ('F', 9), ('M', 2880, 21), ('F', 19), ('F', 21), ('M', 96, 22)] 33
 
 if __name__ == "__main__":
     main()
